@@ -323,11 +323,95 @@ render_open_td_block(MD_HTML* r, const MD_CHAR* cell_type, const MD_BLOCK_TD_DET
     }
 }
 
+static MD_SIZE get_local_md_ext_end(const MD_ATTRIBUTE* href) {
+    /* This checks to see if a link is a local link to a *.md file (returning
+     * the offset of the end of the *.md file extension), because these can be
+     * translated into *.html links when Markdown is rendered to HTML, so
+     * relative links still work (including anchors). */
+
+    /* Absolute URIs specify a protocol, followed by a colon. No colon implies
+     * a local link. */
+    int local = 1;
+    MD_SIZE i;
+    for (i = 0; i < href->size; i++) {
+        if (*(href->text + i) == ':') {
+            local = 0;
+            break;
+        }
+    }
+
+    if (local && href->size > 3) {
+        /* Check if the link is to a *.md file by starting from the end or "#"  */
+        MD_SIZE ext_end = href->size - 1;;
+        for (i = ext_end; i > 2; i--) {
+            if (*(href->text + i) == '#') {
+                ext_end = i - 1;
+                break;
+            }
+        }
+
+        /* Check extension of link destination to see if it's ".md" */
+        const MD_CHAR* c = href->text + ext_end;
+        if (ext_end > 2 && *c == 'd' && *(c - 1) == 'm' && *(c - 2) == '.') {
+            return ext_end;
+        }
+    }
+
+    return 0;
+}
+
+static int try_render_translated_markdown_link(MD_HTML* r, const MD_ATTRIBUTE* href, const MD_SIZE md_ext_end) {
+    if (md_ext_end > 0) {
+        /* It's a local link to a *.md file; rewrite it. Unfortunately, this is
+         * a fragile hack that only exists because it was easy and it worked in
+         * my case. Basically, this just copies the attribute onto the stack
+         * and modifies the link text. A limit of 300 characters is hard-coded,
+         * again only for convenience. */
+
+        MD_CHAR rewritten[300];
+
+        if ((href->size + 2) < sizeof(rewritten)/sizeof(MD_CHAR)) {
+            /* Possibly not sound! This assumes we only need a single "normal" substring segment */
+            const MD_SIZE translated_size = href->size + 2; /* md -> html */
+            MD_TEXTTYPE substr_types[2] = { MD_TEXT_NORMAL, MD_TEXT_NULLCHAR };
+            MD_OFFSET substr_offsets[2] = { 0, translated_size };
+            MD_ATTRIBUTE attr = { &rewritten[0], translated_size, &substr_types[0], &substr_offsets[0] };
+            int i;
+
+            for (i = 0; i < md_ext_end - 1; i++) {
+                rewritten[i] = href->text[i];
+            }
+
+            rewritten[i++] = 'h';
+            rewritten[i++] = 't';
+            rewritten[i++] = 'm';
+            rewritten[i++] = 'l';
+
+            for (i = md_ext_end + 1; i < href->size; i++) {
+                rewritten[i + 2] = href->text[i];
+            }
+
+            render_attribute(r, &attr, render_url_escaped);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static void
 render_open_a_span(MD_HTML* r, const MD_SPAN_A_DETAIL* det)
 {
     RENDER_VERBATIM(r, "<a href=\"");
-    render_attribute(r, &det->href, render_url_escaped);
+
+    /* Translate local *.md links to their *.html counterparts, if requested */
+    if ((r->flags & MD_HTML_FLAG_TRANSLATE_MD_LINKS)
+            && try_render_translated_markdown_link(r, &det->href, get_local_md_ext_end(&det->href))) {
+        /* Translated "href" attribute was already written, so do nothing here */
+    }
+    else {
+        render_attribute(r, &det->href, render_url_escaped);
+    }
 
     if(det->title.text != NULL) {
         RENDER_VERBATIM(r, "\" title=\"");
